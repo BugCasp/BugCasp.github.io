@@ -1,0 +1,1191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>BugCasp — Startup Security Platform</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: 'Segoe UI', ui-sans-serif, system-ui, sans-serif; }
+  .badge-critical { background:#7f1d1d; color:#fecaca; }
+  .badge-high { background:#7c2d12; color:#fed7aa; }
+  .badge-medium { background:#78350f; color:#fde68a; }
+  .badge-low { background:#14532d; color:#bbf7d0; }
+  .status-New { background:#1e3a8a; color:#bfdbfe; }
+  .status-Triaged { background:#581c87; color:#e9d5ff; }
+  .status-Resolved { background:#14532d; color:#bbf7d0; }
+  .status-Duplicate { background:#374151; color:#d1d5db; }
+  .status-Informative { background:#164e63; color:#a5f3fc; }
+  .status-NotApplicable { background:#450a0a; color:#fecaca; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+  .fade-in { animation: fadeIn .18s ease-in; }
+  @keyframes fadeIn { from { opacity:0; transform: translateY(4px);} to {opacity:1; transform:none;} }
+</style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+
+<!-- ============================= NAVBAR ============================= -->
+<nav class="bg-slate-900/90 backdrop-blur border-b border-slate-800 sticky top-0 z-40">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-2 cursor-pointer" onclick="navigate('home')">
+      <img src="static/Gemini_Generated_Image_u4ci42u4ci42u4ci.jpg" class="h-8 w-auto object-contain" />
+      <span class="font-bold text-lg tracking-tight">Bug<span class="text-emerald-400">Casp</span></span>
+    </div>
+
+    <div id="nav-tabs" class="hidden md:flex items-center gap-1 text-sm font-medium"></div>
+
+    <div id="nav-right" class="flex items-center gap-3"></div>
+  </div>
+  <div id="nav-tabs-mobile" class="md:hidden flex overflow-x-auto gap-1 px-4 pb-2 text-sm font-medium"></div>
+</nav>
+
+<!-- ============================= MAIN ============================= -->
+<main id="app" class="max-w-7xl mx-auto px-4 sm:px-6 py-8"></main>
+
+<!-- ============================= MODAL ROOT ============================= -->
+<div id="modal-root"></div>
+
+<!-- ============================= TOAST ============================= -->
+<div id="toast" class="fixed bottom-5 right-5 z-50 space-y-2"></div>
+
+<script>
+/* =========================================================================
+   STATE
+   ========================================================================= */
+const state = {
+  token: localStorage.getItem('bb_token') || null,
+  role: localStorage.getItem('bb_role') || null,
+  user: null,
+  view: 'home',
+  programs: [],
+  myPrograms: [],
+  myReports: [],
+  leaderboard: [],
+  pendingCompanies: [],
+  pendingPrograms: [],
+  allReports: [],
+  analytics: null,
+  selectedProgram: null,
+  selectedProgramReports: [],
+};
+
+/* =========================================================================
+   API HELPER
+   ========================================================================= */
+async function api(path, { method = 'GET', body = null, auth = true } = {}) {
+  const headers = {};
+
+  if (auth && state.token) {
+    headers['Authorization'] = `Bearer ${state.token}`;
+  }
+
+  let requestBody = undefined;
+
+  if (body instanceof FormData) {
+    // File upload üçün FormData olduğu kimi göndərilir.
+    // Content-Type yazmırıq — browser özü multipart/form-data boundary əlavə edir.
+    requestBody = body;
+  } else if (body !== null && body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    requestBody = JSON.stringify(body);
+  }
+
+  const res = await fetch(path, {
+    method,
+    headers,
+    body: requestBody,
+  });
+
+  let data = null;
+
+  try {
+    data = await res.json();
+  } catch (e) {
+    data = null;
+  }
+
+  if (!res.ok) {
+    const msg = data && data.detail
+      ? (
+          typeof data.detail === 'string'
+            ? data.detail
+            : JSON.stringify(data.detail)
+        )
+      : `Request failed (${res.status})`;
+
+    throw new Error(msg);
+  }
+
+  return data;
+}
+
+function toast(message, type = 'info') {
+  const colors = {
+    info: 'bg-slate-800 border-slate-700',
+    success: 'bg-emerald-900 border-emerald-700',
+    error: 'bg-red-900 border-red-700',
+  };
+  const el = document.createElement('div');
+  el.className = `fade-in border ${colors[type]} text-sm text-slate-100 px-4 py-3 rounded-lg shadow-lg max-w-sm`;
+  el.textContent = message;
+  document.getElementById('toast').appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+/* =========================================================================
+   AUTH
+   ========================================================================= */
+function setSession(token, role) {
+  state.token = token;
+  state.role = role;
+  localStorage.setItem('bb_token', token);
+  localStorage.setItem('bb_role', role);
+}
+
+function logout() {
+  state.token = null;
+  state.role = null;
+  state.user = null;
+  localStorage.removeItem('bb_token');
+  localStorage.removeItem('bb_role');
+  navigate('home');
+  toast('Logged out', 'info');
+}
+
+async function loadMe() {
+  if (!state.token) { state.user = null; return; }
+  try {
+    state.user = await api('/api/auth/me');
+  } catch (e) {
+    logout();
+  }
+}
+
+async function doLogin(username, password) {
+  try {
+    const data = await api('/api/auth/login', { method: 'POST', body: { username, password }, auth: false });
+    setSession(data.access_token, data.role);
+    await loadMe();
+    closeModal();
+    toast(`Welcome back, ${username}!`, 'success');
+    navigate(defaultViewForRole(state.role));
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function doRegisterHacker(payload) {
+  try {
+    const data = await api('/api/auth/register', { method: 'POST', body: { account_type: 'hacker', ...payload }, auth: false });
+    setSession(data.access_token, data.role);
+    await loadMe();
+    closeModal();
+    toast('Hacker account created! Welcome aboard.', 'success');
+    navigate('hacker-hub');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function doRegisterCompany(payload) {
+  try {
+    const data = await api('/api/auth/register', { method: 'POST', body: { account_type: 'company', ...payload }, auth: false });
+    setSession(data.access_token, data.role);
+    await loadMe();
+    closeModal();
+    toast('Company account created! Awaiting SuperAdmin approval.', 'success');
+    navigate('company-dashboard');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function defaultViewForRole(role) {
+  if (role === 'superadmin') return 'admin-dashboard';
+  if (role === 'company') return 'company-dashboard';
+  if (role === 'hacker') return 'hacker-hub';
+  return 'home';
+}
+
+/* =========================================================================
+   ROUTER
+   ========================================================================= */
+async function navigate(view) {
+  state.view = view;
+  render();
+  try {
+    if (view === 'home' || view === 'leaderboard') {
+      state.leaderboard = await api('/api/hacker/leaderboard', { auth: false });
+    }
+    if (view === 'hacker-hub') {
+      state.programs = await api('/api/hacker/programs', { auth: false });
+      state.myReports = state.token ? await api('/api/hacker/my-reports') : [];
+    }
+    if (view === 'company-dashboard') {
+      state.myPrograms = await api('/api/company/my-programs');
+    }
+    if (view === 'admin-dashboard') {
+      const [pc, pp, ar, an] = await Promise.all([
+        api('/api/admin/pending-companies'),
+        api('/api/admin/pending-programs'),
+        api('/api/admin/all-reports'),
+        api('/api/admin/analytics'),
+      ]);
+      state.pendingCompanies = pc;
+      state.pendingPrograms = pp;
+      state.allReports = ar;
+      state.analytics = an;
+    }
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+  render();
+}
+
+/* =========================================================================
+   MODAL HELPERS
+   ========================================================================= */
+function closeModal() {
+  document.getElementById('modal-root').innerHTML = '';
+}
+
+function openModal(html) {
+  document.getElementById('modal-root').innerHTML = `
+    <div class="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4" onclick="if(event.target===this) closeModal()">
+      <div class="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl fade-in">
+        ${html}
+      </div>
+    </div>`;
+}
+
+/* =========================================================================
+   AUTH MODALS
+   ========================================================================= */
+function openLoginModal() {
+  openModal(`
+    <div class="p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-xl font-bold">Log In</h2>
+        <button onclick="closeModal()" class="text-slate-400 hover:text-white">✕</button>
+      </div>
+      <form id="login-form" class="space-y-3">
+        <input required name="username" placeholder="Username" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+        <input required name="password" type="password" placeholder="Password" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+        <button type="submit" class="w-full bg-emerald-600 hover:bg-emerald-500 transition rounded-lg py-2 font-semibold">Log In</button>
+      </form>
+      <p class="text-xs text-slate-500 mt-3">Default SuperAdmin: <span class="text-slate-300">admin / AdminPass123!</span></p>
+      <p class="text-sm text-slate-400 mt-4 text-center">No account? 
+        <a href="#" onclick="openRegisterChoiceModal();return false;" class="text-emerald-400 hover:underline">Register</a>
+      </p>
+    </div>
+  `);
+  document.getElementById('login-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    doLogin(fd.get('username'), fd.get('password'));
+  });
+}
+
+function openRegisterChoiceModal() {
+  openModal(`
+    <div class="p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-xl font-bold">Create an Account</h2>
+        <button onclick="closeModal()" class="text-slate-400 hover:text-white">✕</button>
+      </div>
+      <p class="text-sm text-slate-400 mb-4">Choose how you want to join the platform.</p>
+      <div class="grid grid-cols-2 gap-3">
+        <button onclick="openRegisterHackerModal()" class="border border-slate-700 hover:border-emerald-500 rounded-xl p-4 text-left transition">
+          <div class="text-2xl mb-1">🕵️</div>
+          <div class="font-semibold">Hacker</div>
+          <div class="text-xs text-slate-400 mt-1">Find bugs, earn reputation & rewards.</div>
+        </button>
+        <button onclick="openRegisterCompanyModal()" class="border border-slate-700 hover:border-emerald-500 rounded-xl p-4 text-left transition">
+          <div class="text-2xl mb-1">🏢</div>
+          <div class="font-semibold">Startup / Company</div>
+          <div class="text-xs text-slate-400 mt-1">Launch a bug bounty program.</div>
+        </button>
+      </div>
+    </div>
+  `);
+}
+
+function openRegisterHackerModal() {
+  openModal(`
+    <div class="p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-xl font-bold">Register — Hacker</h2>
+        <button onclick="closeModal()" class="text-slate-400 hover:text-white">✕</button>
+      </div>
+      <form id="reg-hacker-form" class="space-y-3">
+        <input required name="username" placeholder="Username" class="input" />
+        <input required name="email" type="email" placeholder="Email" class="input" />
+        <input required name="password" type="password" placeholder="Password (min 8 chars)" class="input" />
+        <input required name="handle" placeholder="Handle (public @name)" class="input" />
+        <textarea name="bio" placeholder="Short bio" rows="2" class="input"></textarea>
+        <input name="tryhackme_url" placeholder="TryHackMe profile URL" class="input" />
+        <input name="hackthebox_url" placeholder="Hack The Box profile URL" class="input" />
+        <input name="github_url" placeholder="GitHub profile URL" class="input" />
+        <button type="submit" class="w-full bg-emerald-600 hover:bg-emerald-500 transition rounded-lg py-2 font-semibold">Create Hacker Account</button>
+      </form>
+    </div>
+  `);
+  addInputClasses();
+  document.getElementById('reg-hacker-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    doRegisterHacker(Object.fromEntries(fd.entries()));
+  });
+}
+
+function openRegisterCompanyModal() {
+  openModal(`
+    <div class="p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-xl font-bold">Register — Startup</h2>
+        <button onclick="closeModal()" class="text-slate-400 hover:text-white">✕</button>
+      </div>
+      <form id="reg-company-form" class="space-y-3">
+        <input required name="username" placeholder="Login Username" class="input" />
+        <input required name="email" type="email" placeholder="Account Email" class="input" />
+        <input required name="password" type="password" placeholder="Password (min 8 chars)" class="input" />
+        <input required name="company_name" placeholder="Company Name" class="input" />
+        <input required name="industry" placeholder="Industry" class="input" />
+        <input required name="website_url" placeholder="Main Website URL" class="input" />
+        <button type="submit" class="w-full bg-emerald-600 hover:bg-emerald-500 transition rounded-lg py-2 font-semibold">Create Company Account</button>
+      </form>
+    </div>
+  `);
+  addInputClasses();
+  document.getElementById('reg-company-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    doRegisterCompany(Object.fromEntries(fd.entries()));
+  });
+}
+
+function addInputClasses() {
+  document.querySelectorAll('#modal-root .input').forEach(el => {
+    el.classList.add('w-full', 'bg-slate-800', 'border', 'border-slate-700', 'rounded-lg', 'px-3', 'py-2', 'text-sm', 'focus:outline-none', 'focus:ring-2', 'focus:ring-emerald-500');
+  });
+}
+
+/* =========================================================================
+   PROGRAM CREATION (Company)
+   ========================================================================= */
+function openCreateProgramModal() {
+  openModal(`
+    <div class="p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-xl font-bold">New Bug Bounty Program</h2>
+        <button onclick="closeModal()" class="text-slate-400 hover:text-white">✕</button>
+      </div>
+      <form id="create-program-form" class="space-y-3">
+        <input required name="title" placeholder="Program Title" class="input" />
+        <input required name="target_url" placeholder="Target URL" class="input" />
+        <textarea required name="in_scope" placeholder="In-Scope assets (one per line)" rows="2" class="input"></textarea>
+        <textarea required name="out_of_scope" placeholder="Out-of-Scope boundaries" rows="2" class="input"></textarea>
+        <textarea name="rules_of_engagement" placeholder="Rules of Engagement" rows="2" class="input"></textarea>
+        <select name="bounty_type" class="input">
+          <option value="points">Reputation Points</option>
+          <option value="cash">Cash Reward</option>
+        </select>
+        <div class="grid grid-cols-2 gap-2">
+          <input name="reward_low" placeholder="Reward: Low (e.g. $50)" class="input" />
+          <input name="reward_medium" placeholder="Reward: Medium (e.g. $150)" class="input" />
+          <input name="reward_high" placeholder="Reward: High (e.g. $500)" class="input" />
+          <input name="reward_critical" placeholder="Reward: Critical (e.g. $1500)" class="input" />
+        </div>
+        <button type="submit" class="w-full bg-emerald-600 hover:bg-emerald-500 transition rounded-lg py-2 font-semibold">Submit for Approval</button>
+      </form>
+    </div>
+  `);
+  addInputClasses();
+  document.getElementById('create-program-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try {
+      await api('/api/company/programs', { method: 'POST', body: Object.fromEntries(fd.entries()) });
+      closeModal();
+      toast('Program submitted for SuperAdmin approval.', 'success');
+      navigate('company-dashboard');
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  });
+}
+
+/* =========================================================================
+   COMPANY: VIEW PROGRAM REPORTS
+   ========================================================================= */
+async function openProgramReportsModal(programId, programTitle) {
+  let reports = [];
+  try {
+    reports = await api(`/api/company/programs/${programId}/reports`);
+  } catch (e) {
+    toast(e.message, 'error');
+    return;
+  }
+  openModal(`
+    <div class="p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-xl font-bold">Reports — ${escapeHtml(programTitle)}</h2>
+        <button onclick="closeModal()" class="text-slate-400 hover:text-white">✕</button>
+      </div>
+      <div class="space-y-3 max-h-[65vh] overflow-y-auto pr-1">
+        ${reports.length === 0 ? '<p class="text-slate-500 text-sm">No reports submitted yet.</p>' : reports.map(r => reportCard(r, true)).join('')}
+      </div>
+    </div>
+  `);
+}
+
+async function updateReportStatus(reportId, selectEl) {
+  const status = selectEl.value;
+  try {
+    await api(`/api/company/reports/${reportId}/status`, { method: 'PUT', body: { status } });
+    toast(`Report #${reportId} marked as ${status}`, 'success');
+    const badge = document.getElementById(`status-badge-${reportId}`);
+    if (badge) {
+      badge.className = `px-2 py-1 rounded-full text-xs font-semibold status-${status.replace(/\s/g, '')}`;
+      badge.textContent = status;
+    }
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+/* =========================================================================
+   HACKER: PROGRAM DETAIL + REPORT SUBMIT
+   ========================================================================= */
+async function openProgramDetailModal(programId) {
+  let program;
+  try {
+    program = await api(`/api/hacker/programs/${programId}`, { auth: false });
+  } catch (e) {
+    toast(e.message, 'error');
+    return;
+  }
+  openModal(`
+    <div class="p-6">
+      <div class="flex items-center justify-between mb-2">
+        <h2 class="text-xl font-bold">${escapeHtml(program.title)}</h2>
+        <button onclick="closeModal()" class="text-slate-400 hover:text-white">✕</button>
+      </div>
+      <p class="text-sm text-slate-400 mb-4">by ${escapeHtml(program.company_name || 'Unknown Company')} · <a href="${escapeAttr(program.target_url)}" target="_blank" class="text-emerald-400 hover:underline">${escapeHtml(program.target_url)}</a></p>
+      <div class="space-y-3 text-sm">
+        <div><span class="font-semibold text-emerald-400">In-Scope:</span><p class="text-slate-300 whitespace-pre-wrap mt-1">${escapeHtml(program.in_scope)}</p></div>
+        <div><span class="font-semibold text-red-400">Out-of-Scope:</span><p class="text-slate-300 whitespace-pre-wrap mt-1">${escapeHtml(program.out_of_scope)}</p></div>
+        ${program.rules_of_engagement ? `<div><span class="font-semibold text-amber-400">Rules of Engagement:</span><p class="text-slate-300 whitespace-pre-wrap mt-1">${escapeHtml(program.rules_of_engagement)}</p></div>` : ''}
+        <div class="grid grid-cols-4 gap-2 pt-2">
+          ${rewardChip('Low', program.reward_low)}
+          ${rewardChip('Medium', program.reward_medium)}
+          ${rewardChip('High', program.reward_high)}
+          ${rewardChip('Critical', program.reward_critical)}
+        </div>
+      </div>
+      <div class="mt-5">
+        ${state.role === 'hacker'
+          ? `<button onclick="openSubmitReportModal(${program.id}, '${escapeAttr(program.title)}')" class="w-full bg-emerald-600 hover:bg-emerald-500 transition rounded-lg py-2 font-semibold">Submit Vulnerability Report</button>`
+          : `<button onclick="closeModal();openLoginModal();" class="w-full bg-slate-700 hover:bg-slate-600 transition rounded-lg py-2 font-semibold">Log in as a Hacker to Submit a Report</button>`
+        }
+      </div>
+    </div>
+  `);
+}
+
+function rewardChip(label, value) {
+  return `<div class="bg-slate-800 rounded-lg p-2 text-center">
+    <div class="text-[10px] uppercase text-slate-500">${label}</div>
+    <div class="text-xs font-semibold mt-0.5">${value ? escapeHtml(value) : '—'}</div>
+  </div>`;
+}
+
+function openSubmitReportModal(programId, programTitle) {
+  openModal(`
+    <div class="p-6">
+
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-xl font-bold">Submit Report</h2>
+
+        <button
+          onclick="closeModal()"
+          class="text-slate-400 hover:text-white"
+        >
+          ✕
+        </button>
+      </div>
+
+      <p class="text-sm text-slate-400 mb-3">
+        Target:
+        <span class="text-slate-200">
+          ${escapeHtml(programTitle)}
+        </span>
+      </p>
+
+      <form id="submit-report-form" class="space-y-3">
+
+        <input
+          required
+          name="title"
+          placeholder="Vulnerability Title"
+          class="input"
+        />
+
+        <input
+          required
+          name="cwe_category"
+          placeholder="CWE / OWASP Category"
+          class="input"
+        />
+
+        <div class="grid grid-cols-2 gap-2">
+
+          <select required name="severity" class="input">
+            <option value="">Severity...</option>
+            <option value="Low">Low</option>
+            <option value="Medium">Medium</option>
+            <option value="High">High</option>
+            <option value="Critical">Critical</option>
+          </select>
+
+          <input
+            required
+            name="cvss_score"
+            type="number"
+            step="0.1"
+            min="0"
+            max="10"
+            placeholder="CVSS v3 Score (0-10)"
+            class="input"
+          />
+
+        </div>
+
+        <!-- DRAG & DROP -->
+
+        <div
+          id="report-drop-zone"
+          class="border-2 border-dashed border-slate-700
+                 rounded-xl p-8 text-center cursor-pointer
+                 transition hover:border-emerald-500
+                 hover:bg-slate-800/50"
+        >
+
+          <div class="text-4xl mb-3">📄</div>
+
+          <p class="text-slate-200 font-semibold">
+            Drag & Drop Report File
+          </p>
+
+          <p class="text-sm text-slate-500 mt-2">
+            or click to select a file
+          </p>
+
+          <p class="text-xs text-slate-600 mt-3">
+            TXT · MD · JSON · PDF
+          </p>
+
+          <input
+            id="report-file"
+            type="file"
+            hidden
+            accept=".txt,.md,.json,.pdf"
+          />
+
+        </div>
+
+        <div
+          id="selected-report-file"
+          class="hidden bg-slate-900 border border-slate-800
+                 rounded-lg p-3"
+        ></div>
+
+        <div
+          id="report-file-error"
+          class="hidden text-sm text-red-400"
+        ></div>
+
+        <button
+          type="submit"
+          class="w-full bg-emerald-600 hover:bg-emerald-500
+                 transition rounded-lg py-2 font-semibold"
+        >
+          Submit Report
+        </button>
+
+      </form>
+    </div>
+  `);
+
+  addInputClasses();
+
+  const form = document.getElementById('submit-report-form');
+  const dropZone = document.getElementById('report-drop-zone');
+  const fileInput = document.getElementById('report-file');
+  const selectedFile = document.getElementById('selected-report-file');
+  const fileError = document.getElementById('report-file-error');
+
+  let reportFile = null;
+  let uploadedEvidence = null;
+
+  const allowedExtensions = [
+    '.txt',
+    '.md',
+    '.json',
+    '.pdf'
+  ];
+
+  function showFileError(message) {
+    fileError.textContent = message;
+    fileError.classList.remove('hidden');
+
+    selectedFile.classList.add('hidden');
+
+    reportFile = null;
+    uploadedEvidence = null;
+  }
+
+  function clearFileError() {
+    fileError.textContent = '';
+    fileError.classList.add('hidden');
+  }
+
+  function selectReportFile(file) {
+    clearFileError();
+
+    if (!file) return;
+
+    const extension =
+      '.' + file.name.split('.').pop().toLowerCase();
+
+    if (!allowedExtensions.includes(extension)) {
+      showFileError(
+        'This file type is not allowed.'
+      );
+      return;
+    }
+
+    reportFile = file;
+
+    selectedFile.innerHTML = `
+      <div class="flex items-center justify-between gap-3">
+
+        <div class="flex items-center gap-3 min-w-0">
+
+          <span class="text-2xl">📎</span>
+
+          <div class="min-w-0">
+
+            <p class="text-sm text-slate-200 truncate">
+              ${escapeHtml(file.name)}
+            </p>
+
+            <p class="text-xs text-slate-500">
+              ${(file.size / 1024).toFixed(1)} KB
+            </p>
+
+          </div>
+
+        </div>
+
+        <span class="text-xs text-emerald-400">
+          Ready
+        </span>
+
+      </div>
+    `;
+
+    selectedFile.classList.remove('hidden');
+  }
+
+  dropZone.addEventListener('click', () => {
+    fileInput.click();
+  });
+
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files.length) {
+      selectReportFile(fileInput.files[0]);
+    }
+  });
+
+  dropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+
+    dropZone.classList.add(
+      'border-emerald-500',
+      'bg-slate-800'
+    );
+  });
+
+  dropZone.addEventListener('dragleave', () => {
+    dropZone.classList.remove(
+      'border-emerald-500',
+      'bg-slate-800'
+    );
+  });
+
+  dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+
+    dropZone.classList.remove(
+      'border-emerald-500',
+      'bg-slate-800'
+    );
+
+    const file = e.dataTransfer.files[0];
+
+    if (file) {
+      selectReportFile(file);
+    }
+  });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    clearFileError();
+
+    if (!reportFile) {
+      showFileError(
+        'Please attach a report file first.'
+      );
+      return;
+    }
+
+    try {
+
+      /*
+       * STEP 1
+       * Upload evidence file
+       */
+
+      const fileData = new FormData();
+
+      fileData.append(
+        'file',
+        reportFile
+      );
+
+      uploadedEvidence = await api(
+        '/api/hacker/reports/upload',
+        {
+          method: 'POST',
+          body: fileData
+        }
+      );
+
+
+      /*
+       * STEP 2
+       * Submit report
+       */
+
+      const payload = {
+        program_id: programId,
+        title: form.elements.title.value,
+        cwe_category: form.elements.cwe_category.value,
+        severity: form.elements.severity.value,
+        cvss_score: parseFloat(form.elements.cvss_score.value),
+
+  // File əsas report olduğu üçün backend-in tələb etdiyi minimum mətn
+        impact_analysis: 'See attached report.',
+        poc_steps: 'See attached report.',
+        http_payload: '',
+
+        evidence_path: uploadedEvidence.evidence_path,
+        evidence_filename: uploadedEvidence.evidence_filename
+};
+
+
+      await api(
+        '/api/hacker/reports',
+        {
+          method: 'POST',
+          body: payload
+        }
+      );
+
+
+      closeModal();
+
+      toast(
+        'Report submitted. Good hunting!',
+        'success'
+      );
+
+      navigate('hacker-hub');
+
+    } catch (err) {
+
+      toast(
+        err.message,
+        'error'
+      );
+
+    }
+  });
+}
+
+/* =========================================================================
+   ADMIN ACTIONS
+   ========================================================================= */
+async function approveCompany(companyId) {
+  try {
+    await api(`/api/admin/approve-company/${companyId}`, { method: 'POST' });
+    toast('Company approval status toggled', 'success');
+    navigate('admin-dashboard');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function approveProgram(programId) {
+  try {
+    await api(`/api/admin/approve-program/${programId}`, { method: 'POST' });
+    toast('Program approval status toggled', 'success');
+    navigate('admin-dashboard');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function adminUpdateReportStatus(reportId, selectEl) {
+  const status = selectEl.value;
+  try {
+    await api(`/api/admin/reports/${reportId}/status`, { method: 'PUT', body: { status } });
+    toast(`Report #${reportId} updated`, 'success');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+/* =========================================================================
+   UTIL
+   ========================================================================= */
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str).replace(/[&<>"']/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+function escapeAttr(str) { return escapeHtml(str).replace(/'/g, '&#39;'); }
+
+function severityBadge(sev) {
+  const cls = { Low: 'badge-low', Medium: 'badge-medium', High: 'badge-high', Critical: 'badge-critical' }[sev] || 'badge-low';
+  return `<span class="px-2 py-1 rounded-full text-xs font-semibold ${cls}">${sev}</span>`;
+}
+
+function statusBadgeClass(status) { return `status-${status.replace(/\s/g, '')}`; }
+
+function timeAgo(iso) {
+  const d = new Date(iso);
+  const diff = (Date.now() - d.getTime()) / 1000;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff/3600)}h ago`;
+  return `${Math.floor(diff/86400)}d ago`;
+}
+
+/* =========================================================================
+   RENDER: NAVBAR
+   ========================================================================= */
+function renderNav() {
+  const tabs = [];
+  tabs.push({ id: 'home', label: 'Home' });
+  tabs.push({ id: 'hacker-hub', label: 'Target Explorer' });
+  tabs.push({ id: 'leaderboard', label: 'Leaderboard' });
+  if (state.role === 'company') tabs.push({ id: 'company-dashboard', label: 'Company Dashboard' });
+  if (state.role === 'superadmin') tabs.push({ id: 'admin-dashboard', label: 'Admin Dashboard' });
+
+  const tabHtml = tabs.map(t => `
+    <button onclick="navigate('${t.id}')" class="px-3 py-2 rounded-lg transition ${state.view === t.id ? 'bg-emerald-600 text-white' : 'text-slate-300 hover:bg-slate-800'}">${t.label}</button>
+  `).join('');
+  document.getElementById('nav-tabs').innerHTML = tabHtml;
+  document.getElementById('nav-tabs-mobile').innerHTML = tabHtml;
+
+  let right = '';
+  if (state.token && state.user) {
+    const roleLabel = { superadmin: 'SuperAdmin', company: 'Company', hacker: 'Hacker' }[state.user.role] || state.user.role;
+    right = `
+      <div class="hidden sm:flex items-center gap-2 text-xs bg-slate-800 rounded-full px-3 py-1.5">
+        <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+        <span class="font-semibold">${escapeHtml(state.user.username)}</span>
+        <span class="text-slate-400">· ${roleLabel}</span>
+        ${state.user.role === 'hacker' ? `<span class="text-amber-400 font-bold ml-1">${state.user.reputation_score} pts</span>` : ''}
+      </div>
+      <button onclick="logout()" class="text-sm bg-slate-800 hover:bg-slate-700 transition px-3 py-1.5 rounded-lg">Log Out</button>
+    `;
+  } else {
+    right = `
+      <button onclick="openLoginModal()" class="text-sm px-3 py-1.5 rounded-lg hover:bg-slate-800 transition">Log In</button>
+      <button onclick="openRegisterChoiceModal()" class="text-sm bg-emerald-600 hover:bg-emerald-500 transition px-3 py-1.5 rounded-lg font-semibold">Get Started</button>
+    `;
+  }
+  document.getElementById('nav-right').innerHTML = right;
+}
+
+/* =========================================================================
+   RENDER: VIEWS
+   ========================================================================= */
+function render() {
+  renderNav();
+  const app = document.getElementById('app');
+  if (state.view === 'home') app.innerHTML = viewHome();
+  else if (state.view === 'hacker-hub') app.innerHTML = viewHackerHub();
+  else if (state.view === 'leaderboard') app.innerHTML = viewLeaderboard();
+  else if (state.view === 'company-dashboard') app.innerHTML = viewCompanyDashboard();
+  else if (state.view === 'admin-dashboard') app.innerHTML = viewAdminDashboard();
+  else app.innerHTML = viewHome();
+}
+
+function viewHome() {
+  return `
+    <section class="text-center py-14 fade-in">
+      <h1 class="text-4xl sm:text-5xl font-extrabold tracking-tight">Where Startups Meet <span class="text-emerald-400">Elite Hackers</span></h1>
+      <p class="text-slate-400 mt-4 max-w-xl mx-auto">Launch a bug bounty program, or hunt vulnerabilities across live targets and climb the Hall of Fame.</p>
+      <div class="flex items-center justify-center gap-3 mt-8">
+        <button onclick="navigate('hacker-hub')" class="bg-emerald-600 hover:bg-emerald-500 transition px-5 py-2.5 rounded-lg font-semibold">Explore Targets</button>
+        <button onclick="openRegisterChoiceModal()" class="bg-slate-800 hover:bg-slate-700 transition px-5 py-2.5 rounded-lg font-semibold">Join the Platform</button>
+      </div>
+    </section>
+    <section class="grid sm:grid-cols-3 gap-4 mt-6">
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+        <div class="text-2xl mb-2">🎯</div>
+        <h3 class="font-bold mb-1">Approved Programs</h3>
+        <p class="text-sm text-slate-400">Every target is vetted by our SuperAdmin team before going live.</p>
+      </div>
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+        <div class="text-2xl mb-2">📊</div>
+        <h3 class="font-bold mb-1">CVSS-Rated Reports</h3>
+        <p class="text-sm text-slate-400">Structured PoC, impact analysis, and CVSS v3 scoring for every submission.</p>
+      </div>
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+        <div class="text-2xl mb-2">🏆</div>
+        <h3 class="font-bold mb-1">Hall of Fame</h3>
+        <p class="text-sm text-slate-400">Earn reputation points and rise up the public leaderboard.</p>
+      </div>
+    </section>
+    <section class="mt-10">
+      <h2 class="text-xl font-bold mb-3">Top Researchers</h2>
+      ${leaderboardTable(state.leaderboard.slice(0, 5))}
+    </section>
+  `;
+}
+
+function viewHackerHub() {
+  const isHacker = state.role === 'hacker';
+  return `
+    <div class="fade-in">
+      <div class="flex items-center justify-between mb-6">
+        <h1 class="text-2xl font-bold">Target Explorer</h1>
+      </div>
+
+      <div class="grid lg:grid-cols-3 gap-4 mb-10">
+        ${state.programs.length === 0 ? `<p class="text-slate-500 col-span-3">No active programs yet. Check back soon.</p>` :
+          state.programs.map(p => `
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 hover:border-emerald-600 transition cursor-pointer" onclick="openProgramDetailModal(${p.id})">
+            <div class="flex items-center justify-between">
+              <h3 class="font-bold text-lg">${escapeHtml(p.title)}</h3>
+              <span class="text-xs bg-slate-800 px-2 py-1 rounded-full">${p.bounty_type === 'cash' ? '💵 Cash' : '⭐ Points'}</span>
+            </div>
+            <p class="text-sm text-slate-400 mt-1">${escapeHtml(p.company_name || '')}</p>
+            <p class="text-xs text-slate-500 mt-2 truncate">${escapeHtml(p.target_url)}</p>
+            <div class="mt-3 text-xs text-emerald-400 font-semibold">View Scope & Submit →</div>
+          </div>
+        `).join('')}
+      </div>
+
+      ${isHacker ? `
+        <h2 class="text-xl font-bold mb-3">My Submission Tracker</h2>
+        <div class="space-y-3">
+          ${state.myReports.length === 0 ? '<p class="text-slate-500 text-sm">You have not submitted any reports yet.</p>' : state.myReports.map(r => reportCard(r, false)).join('')}
+        </div>
+      ` : `
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 text-sm text-slate-400">
+          <a href="#" onclick="openRegisterChoiceModal();return false;" class="text-emerald-400 hover:underline">Create a hacker account</a> to submit vulnerability reports and track your submissions.
+        </div>
+      `}
+    </div>
+  `;
+}
+
+function reportCard(r, showStatusControl) {
+  return `
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div class="flex items-center gap-2 flex-wrap">
+          <h4 class="font-semibold">${escapeHtml(r.title)}</h4>
+          ${severityBadge(r.severity)}
+          <span class="text-xs text-slate-500">CVSS ${r.cvss_score}</span>
+        </div>
+        <span id="status-badge-${r.id}" class="px-2 py-1 rounded-full text-xs font-semibold ${statusBadgeClass(r.status)}">${r.status}</span>
+      </div>
+      <p class="text-xs text-slate-500 mt-1">
+        ${r.program_title ? `Target: ${escapeHtml(r.program_title)} · ` : ''}
+        ${r.hacker_handle ? `by @${escapeHtml(r.hacker_handle)} · ` : ''}
+        ${r.cwe_category} · ${timeAgo(r.created_at)}
+        ${r.reputation_awarded ? ` · <span class="text-amber-400">+${r.reputation_awarded} pts</span>` : ''}
+      </p>
+      <details class="mt-2 text-sm">
+        <summary class="cursor-pointer text-emerald-400 text-xs">View Details</summary>
+        <div class="mt-2 space-y-2 text-slate-300">
+          <div><span class="font-semibold text-slate-200">Impact:</span> ${escapeHtml(r.impact_analysis)}</div>
+          <div><span class="font-semibold text-slate-200">PoC Steps:</span><pre class="whitespace-pre-wrap text-xs bg-slate-950 rounded-lg p-2 mt-1 overflow-x-auto">${escapeHtml(r.poc_steps)}</pre></div>
+          ${r.http_payload ? `<div><span class="font-semibold text-slate-200">HTTP Payload:</span><pre class="whitespace-pre-wrap text-xs bg-slate-950 rounded-lg p-2 mt-1 overflow-x-auto font-mono">${escapeHtml(r.http_payload)}</pre></div>` : ''}
+        </div>
+      </details>
+      ${showStatusControl ? `
+        <div class="mt-3">
+          <select onchange="updateReportStatus(${r.id}, this)" class="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-xs">
+            ${['New','Triaged','Resolved','Duplicate','Informative','Not Applicable'].map(s => `<option value="${s}" ${s === r.status ? 'selected' : ''}>${s}</option>`).join('')}
+          </select>
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+function viewLeaderboard() {
+  return `
+    <div class="fade-in">
+      <h1 class="text-2xl font-bold mb-1">Leaderboard · Hall of Fame</h1>
+      <p class="text-slate-400 text-sm mb-6">Top security researchers ranked by reputation score.</p>
+      ${leaderboardTable(state.leaderboard)}
+    </div>
+  `;
+}
+
+function leaderboardTable(entries) {
+  if (!entries || entries.length === 0) return '<p class="text-slate-500 text-sm">No hackers on the board yet.</p>';
+  return `
+    <div class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-800/60 text-slate-400 text-xs uppercase">
+          <tr><th class="text-left px-4 py-2">Rank</th><th class="text-left px-4 py-2">Researcher</th><th class="text-left px-4 py-2">Resolved</th><th class="text-right px-4 py-2">Reputation</th></tr>
+        </thead>
+        <tbody>
+          ${entries.map(e => `
+            <tr class="border-t border-slate-800">
+              <td class="px-4 py-2">${e.rank === 1 ? '🥇' : e.rank === 2 ? '🥈' : e.rank === 3 ? '🥉' : '#' + e.rank}</td>
+              <td class="px-4 py-2 font-semibold">${e.handle ? '@' + escapeHtml(e.handle) : escapeHtml(e.username)}</td>
+              <td class="px-4 py-2 text-slate-400">${e.resolved_reports}</td>
+              <td class="px-4 py-2 text-right text-amber-400 font-bold">${e.reputation_score}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function viewCompanyDashboard() {
+  const approved = state.user && state.user.company_is_approved;
+  return `
+    <div class="fade-in">
+      <div class="flex items-center justify-between mb-2">
+        <h1 class="text-2xl font-bold">Company Dashboard</h1>
+        <button ${approved ? '' : 'disabled'} onclick="openCreateProgramModal()" class="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed transition px-4 py-2 rounded-lg font-semibold text-sm">+ New Program</button>
+      </div>
+      ${approved
+        ? '<p class="text-emerald-400 text-sm mb-6">✓ Your company is verified by the SuperAdmin.</p>'
+        : '<p class="text-amber-400 text-sm mb-6">⏳ Your company is pending SuperAdmin approval. You can\'t create programs yet.</p>'}
+      <div class="space-y-4">
+        ${state.myPrograms.length === 0 ? '<p class="text-slate-500 text-sm">No programs yet.</p>' : state.myPrograms.map(p => `
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <h3 class="font-bold text-lg">${escapeHtml(p.title)}</h3>
+              <div class="flex items-center gap-2">
+                <span class="text-xs px-2 py-1 rounded-full ${p.is_approved ? 'bg-emerald-900 text-emerald-300' : 'bg-amber-900 text-amber-300'}">${p.is_approved ? 'Approved' : 'Pending Approval'}</span>
+                <span class="text-xs px-2 py-1 rounded-full ${p.is_active ? 'bg-slate-800 text-slate-300' : 'bg-slate-800 text-slate-500'}">${p.is_active ? 'Active' : 'Inactive'}</span>
+              </div>
+            </div>
+            <p class="text-xs text-slate-500 mt-1">${escapeHtml(p.target_url)}</p>
+            <button onclick="openProgramReportsModal(${p.id}, '${escapeAttr(p.title)}')" class="mt-3 text-sm text-emerald-400 hover:underline">View Reports →</button>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function viewAdminDashboard() {
+  const a = state.analytics || {};
+  return `
+    <div class="fade-in">
+      <h1 class="text-2xl font-bold mb-6">SuperAdmin Dashboard</h1>
+
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
+        ${statCard('Active Programs', a.active_programs)}
+        ${statCard('Pending Reports', a.pending_reports)}
+        ${statCard('Pending Companies', a.pending_companies)}
+        ${statCard('Total Payouts (pts)', a.total_payouts_points)}
+      </div>
+
+      <div class="grid lg:grid-cols-2 gap-6">
+        <div>
+          <h2 class="text-lg font-bold mb-3">Pending Companies</h2>
+          <div class="space-y-3">
+            ${state.pendingCompanies.length === 0 ? '<p class="text-slate-500 text-sm">None pending.</p>' : state.pendingCompanies.map(c => `
+              <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 flex items-center justify-between">
+                <div>
+                  <div class="font-semibold">${escapeHtml(c.company_name)}</div>
+                  <div class="text-xs text-slate-500">${escapeHtml(c.industry)} · VOEN ${escapeHtml(c.tax_id)}</div>
+                  <a href="${escapeAttr(c.website_url)}" target="_blank" class="text-xs text-emerald-400 hover:underline">${escapeHtml(c.website_url)}</a>
+                </div>
+                <button onclick="approveCompany(${c.id})" class="bg-emerald-600 hover:bg-emerald-500 transition text-xs px-3 py-1.5 rounded-lg font-semibold">Approve</button>
+              </div>
+            `).join('')}
+          </div>
+
+          <h2 class="text-lg font-bold mb-3 mt-8">Pending Programs</h2>
+          <div class="space-y-3">
+            ${state.pendingPrograms.length === 0 ? '<p class="text-slate-500 text-sm">None pending.</p>' : state.pendingPrograms.map(p => `
+              <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 flex items-center justify-between">
+                <div>
+                  <div class="font-semibold">${escapeHtml(p.title)}</div>
+                  <div class="text-xs text-slate-500">${escapeHtml(p.company_name || '')} · ${escapeHtml(p.target_url)}</div>
+                </div>
+                <button onclick="approveProgram(${p.id})" class="bg-emerald-600 hover:bg-emerald-500 transition text-xs px-3 py-1.5 rounded-lg font-semibold">Approve</button>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+
+        <div>
+          <h2 class="text-lg font-bold mb-3">All Reports (Audit / Mediation)</h2>
+          <div class="space-y-3 max-h-[75vh] overflow-y-auto pr-1">
+            ${state.allReports.length === 0 ? '<p class="text-slate-500 text-sm">No reports yet.</p>' : state.allReports.map(r => `
+              <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+                <div class="flex items-center justify-between flex-wrap gap-2">
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span class="font-semibold text-sm">${escapeHtml(r.title)}</span>
+                    ${severityBadge(r.severity)}
+                  </div>
+                  <select onchange="adminUpdateReportStatus(${r.id}, this)" class="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-xs">
+                    ${['New','Triaged','Resolved','Duplicate','Informative','Not Applicable'].map(s => `<option value="${s}" ${s === r.status ? 'selected' : ''}>${s}</option>`).join('')}
+                  </select>
+                </div>
+                <p class="text-xs text-slate-500 mt-1">${escapeHtml(r.program_title || '')} · @${escapeHtml(r.hacker_handle || r.hacker_username || 'unknown')} · ${timeAgo(r.created_at)}</p>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      </div>
+
+      <h2 class="text-lg font-bold mb-3 mt-10">Top Researchers</h2>
+      ${leaderboardTable(a.top_researchers || [])}
+    </div>
+  `;
+}
+
+function statCard(label, value) {
+  return `
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 text-center">
+      <div class="text-2xl font-extrabold text-emerald-400">${value ?? 0}</div>
+      <div class="text-xs text-slate-500 mt-1">${label}</div>
+    </div>
+  `;
+}
+
+/* =========================================================================
+   INIT
+   ========================================================================= */
+(async function init() {
+  if (state.token) await loadMe();
+  navigate(state.token ? defaultViewForRole(state.role) : 'home');
+})();
+</script>
+</body>
+</html>
